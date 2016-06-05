@@ -69,12 +69,15 @@ typedef struct raw_socket_def {
     u32 ui;
   } hdr;
   u32 uVersion;
-} raw_socket;
+  struct sockaddr_in remoteAddr;
+} mercury_socket;
+
+static void privDestroy(void *pPtr);
 
 #if (LINUX_VERSION_CODE >= KERNEL_VERSION(3,15,0))
 static void privRecvReady(struct sock *pSocket)
 {
-  raw_socket *pRaw = (raw_socket *)pSocket->sk_user_data;
+  mercury_socket *pRaw = (mercury_socket *)pSocket->sk_user_data;
 
   if (NULL != pRaw) {
     if (NULL != pRaw->recvReady) {
@@ -88,7 +91,7 @@ static void privRecvReady(struct sock *pSocket)
 #else
 static void privRecvReady(struct sock *pSocket, int iBytes)
 {
-  raw_socket *pRaw = (raw_socket *)pSocket->sk_user_data;
+  mercury_socket *pRaw = (mercury_socket *)pSocket->sk_user_data;
 
   if (NULL != pRaw) {
     if (NULL != pRaw->recvReady) {
@@ -105,12 +108,12 @@ static void privRecvReady(struct sock *pSocket, int iBytes)
  */
 static void *privCreateRaw(char *pDevLabel)
 {
-  raw_socket *pRaw = NULL;
+  mercury_socket *pRaw = NULL;
   int rvalue;
   struct net_device *pDev = NULL;
 
   if (NULL != pDevLabel) {
-    pRaw = kmalloc(sizeof(raw_socket), GFP_ATOMIC);
+    pRaw = kmalloc(sizeof(mercury_socket), GFP_ATOMIC);
 
     if (NULL != pRaw) {
       pRaw->pSocket = NULL;
@@ -204,12 +207,100 @@ static void *privCreateRaw(char *pDevLabel)
   return pRaw;
 }
 
+static void *privCreateTCP(char *pDevLabel,
+			   unsigned int uiRemoteIP,
+			   unsigned short usRemotePort)
+{
+  mercury_socket *pTCP = NULL;
+  int rvalue;
+
+  if (NULL != pDevLabel) {
+    pTCP = kmalloc(sizeof(mercury_socket), GFP_KERNEL);
+
+    /* Did memory get allocated? */
+    if (NULL != pTCP) {
+      pTCP->pSocket = NULL;
+      pTCP->bConnected = false;
+      
+      /* Create our socket */
+#if (LINUX_VERSION_CODE < KERNEL_VERSION(4,2,0))
+      rvalue = sock_create_kern(PF_PACKET,
+				IPPROTO_TCP,
+                                htons(ETH_P_ALL),
+                                &pTCP->pSocket);
+#else
+      rvalue = sock_create_lite(PF_PACKET,
+				IPPROTO_TCP,
+                                htons(ETH_P_ALL),
+                                &pTCP->pSocket);
+#endif
+      
+      if ((rvalue >= 0) && (NULL != pTCP->pSocket)) {
+        /* Need to reference our data structure */
+        pTCP->pSocket->sk->sk_user_data = (void *)pTCP;
+	
+        /* Set 4 second timeout. Easy calculation. */
+        pTCP->pSocket->sk->sk_sndtimeo = HZ << 2;
+        pTCP->pSocket->sk->sk_rcvtimeo = HZ << 2;
+
+        /* Yea, we can reuse this socket.  Needed? */
+        pTCP->pSocket->sk->sk_reuse = 1;
+
+        /* atomic allocation */
+        pTCP->pSocket->sk->sk_allocation = GFP_ATOMIC;
+
+        /* Create recv queue, before setting callbacks */
+        init_waitqueue_head(&pTCP->recvQueue);
+
+        /* We need a semaphore. */
+        sema_init(&pTCP->sendWait, 1);
+
+        /* Halt any callback */
+        write_lock_bh(&pTCP->pSocket->sk->sk_callback_lock);
+
+        /* Perhaps not needed, but remember our orignal data ready function. */
+        pTCP->recvReady = pTCP->pSocket->sk->sk_data_ready;
+
+        /* Our callback recv function. */
+        pTCP->pSocket->sk->sk_data_ready = privRecvReady;
+	
+        /* Resume any callbacks */
+        write_unlock_bh(&pTCP->pSocket->sk->sk_callback_lock);
+
+	/* The remote network */
+	pTCP->remoteAddr.sin_family = AF_INET;
+	pTCP->remoteAddr.sin_addr.s_addr = uiRemoteIP;
+	pTCP->remoteAddr.sin_port = htons(usRemotePort);
+	
+	rvalue = pTCP->pSocket->ops->connect(pTCP->pSocket,
+					     (struct sockaddr *)&pTCP->remoteAddr,
+					     sizeof(struct sockaddr_in),
+					     0);
+	if (rvalue < 0) {
+	  privDestroy(pTCP);
+	  pTCP = NULL;
+	} else {
+	  /* Set the send/recv threads to null */
+	  pTCP->pRecvThread = NULL;
+	  pTCP->bConnected = true;
+	}
+      } else {
+        MERC_LOG("Error creating socket %s %d\n", pDevLabel, rvalue);
+        kfree(pTCP);
+        pTCP = NULL;
+      }
+    }
+  }
+
+  return (void *)pTCP;
+}
+
 /*
  * Remove everything about a raw connections.
  */
-static void privDestroyRaw(void *pPtr)
+static void privDestroy(void *pPtr)
 {
-  raw_socket *pRaw = (raw_socket *)pPtr;
+  mercury_socket *pRaw = (mercury_socket *)pPtr;
 
   if (NULL != pRaw) {
     /* We are not connected now */
@@ -248,7 +339,7 @@ static unsigned int privSocketSend(void *pPtr,
                                    void *pName,
                                    unsigned int uNameLength)
 {
-  raw_socket *pRaw = (raw_socket *)pPtr;
+  mercury_socket *pRaw = (mercury_socket *)pPtr;
   unsigned long ulFlags;
   sigset_t sigSet;
   siginfo_t sigInfo;
@@ -372,7 +463,7 @@ static unsigned int privSocketSend(void *pPtr,
 */
 static int privRecvPoll(void *pPtr)
 {
-  raw_socket *pRaw = (raw_socket *)pPtr;
+  mercury_socket *pRaw = (mercury_socket *)pPtr;
   int rvalue = 0;
 
   if (NULL != pRaw) {
@@ -392,7 +483,7 @@ static int privRecvPoll(void *pPtr)
 */
 static void privRecvWait(void *pPtr)
 {
-  raw_socket *pRaw = (raw_socket *)pPtr;
+  mercury_socket *pRaw = (mercury_socket *)pPtr;
 
   int rvalue = 0;
 
@@ -404,7 +495,7 @@ static void privRecvWait(void *pPtr)
 
 static int privateRecvRawThread(void *pPtr)
 {
-  raw_socket *pRaw = (raw_socket *)pPtr;
+  mercury_socket *pRaw = (mercury_socket *)pPtr;
   struct sk_buff *pSkb = NULL;
   MERC_RAW_HEADER *pHdr = NULL;
   unsigned int uHdrLen = sizeof(MERC_RAW_HEADER);
@@ -468,7 +559,7 @@ static int privateRecvRawThread(void *pPtr)
 
 void *mercNetConnectRaw(void *pData, char *pDevLabel)
 {
-  raw_socket *pRaw = NULL;
+  mercury_socket *pRaw = NULL;
 
   MERC_LOG("Create Raw Socket %s\n", pDevLabel);
   pRaw = privCreateRaw(pDevLabel);
@@ -485,9 +576,32 @@ void *mercNetConnectRaw(void *pData, char *pDevLabel)
 }
 EXPORT_SYMBOL(mercNetConnectRaw);
 
-void mercNetDisconnectRaw(void *pPtr)
+void *mercNetConnectTCP(void *pData, 
+			char *pDevLabel,
+			unsigned int uiRemoteIP,
+			unsigned short usRemotePort)
 {
-  raw_socket *pRaw = (raw_socket *)pPtr;
+  mercury_socket *pTCP = NULL;
+
+  MERC_LOG("Create TCP Socket %s\n", pDevLabel);
+  pTCP = privCreateTCP(pDevLabel, uiRemoteIP, usRemotePort);
+
+  if (NULL != pTCP) {
+    sprintf(pTCP->pRecvName, "merc-%s-recv", pDevLabel);
+    pTCP->pData = pData;
+    /* SWW: create raw thread next */
+    pTCP->pRecvThread = (void *)kthread_run(privateRecvRawThread,
+                                            (void *)pTCP,
+                                            pTCP->pRecvName);
+  }
+
+  return (void *)pTCP;
+}
+EXPORT_SYMBOL(mercNetConnectTCP);
+
+void mercNetDisconnect(void *pPtr)
+{
+  mercury_socket *pRaw = (mercury_socket *)pPtr;
 
   if (NULL != pRaw) {
     /* Lets make the socket inactive. */
@@ -500,10 +614,10 @@ void mercNetDisconnectRaw(void *pPtr)
       pRaw->pRecvThread = NULL;
     }
 
-    privDestroyRaw(pRaw);
+    privDestroy(pRaw);
   }
 }
-EXPORT_SYMBOL(mercNetDisconnectRaw);
+EXPORT_SYMBOL(mercNetDisconnect);
 
 /*
  * Send the contents of an sk_buff raw on a network device.
@@ -512,7 +626,7 @@ unsigned int mercTransmitRaw(void *pPtr,
 			     struct sk_buff *pSkb,
 			     char *pHdr, unsigned int uHdrSize)
 {
-  raw_socket *pRaw = (raw_socket *)pPtr;
+  mercury_socket *pRaw = (mercury_socket *)pPtr;
   MERC_RAW_HEADER khdr;
   struct sockaddr_ll llAddr;
   struct iovec sioVec [4];
