@@ -1,5 +1,5 @@
 /*
- * Mercury Socket Interface - Copied from klem driver by Stuart Wells
+ * Wireless Kernel Link Emulator
  *
  * Copyright (C) 2013 - 2016 Stuart Wells <swells@stuartwells.net>
  * All rights reserved.
@@ -16,17 +16,7 @@
  * GNU General Public License for more details.
  *
  */
-
-#ifndef MERC_SOCKET_INCLUDE
-#define MERC_SOCKET_INCLUDE
-void *mercNetConnectRaw(void *pData, char *pDevLabel);
-void *mercNetConnectTCP(void *pData, 
-			char *pDevLabel,
-			unsigned int uiRemoteIP,
-			unsigned short usRemotePort);
-void mercNetDisconnectRaw(void *pPtr);
-unsigned int mercTransmit(void *pPtr,
-			  struct sk_buff *pSkb,
-			  char *pHdr, unsigned int uHdrSize);
-
+#ifndef KLEM_PROC_INCLUDE
+void riverProcInit(void *pPtr);
+void riverProcDeinit(void *pPtr);
 #endif

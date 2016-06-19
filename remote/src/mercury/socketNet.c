@@ -622,9 +622,9 @@ EXPORT_SYMBOL(mercNetDisconnect);
 /*
  * Send the contents of an sk_buff raw on a network device.
  */
-unsigned int mercTransmitRaw(void *pPtr,
-			     struct sk_buff *pSkb,
-			     char *pHdr, unsigned int uHdrSize)
+unsigned int mercTransmit(void *pPtr,
+			  struct sk_buff *pSkb,
+			  char *pHdr, unsigned int uHdrSize)
 {
   mercury_socket *pRaw = (mercury_socket *)pPtr;
   MERC_RAW_HEADER khdr;
@@ -702,4 +702,4 @@ unsigned int mercTransmitRaw(void *pPtr,
 
   return rvalue;
 }
-EXPORT_SYMBOL(mercTransmitRaw);
+EXPORT_SYMBOL(mercTransmit);
